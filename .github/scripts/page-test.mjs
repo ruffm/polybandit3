@@ -63,13 +63,17 @@ try {
   await page.screenshot({ path: `${shots}/bandit1.png` });
   const until = Date.now() + 240000;
   for (;;) {
-    await typeText("clear\nnextlevel\n");
+    await typeText("nextlevel\n");
     // Wait for one of the two outcomes before deciding, so a slow su can't
     // make us type nextlevel twice and skip past bandit2.
     await waitFor(/Level\s*:\s*bandit2\b|still being prepared/, 60000, "nextlevel to answer");
     if (/Level\s*:\s*bandit2\b/.test(await screenText())) break;
     if (Date.now() > until) throw new Error("bandit2 was still being prepared after 240s");
-    await new Promise(r => setTimeout(r, 3000));   // 3.1: level not ready yet; retry
+    // 3.1: level not ready yet. Clear the message (and let clear finish before
+    // typing again, or keystrokes get split), then retry.
+    await new Promise(r => setTimeout(r, 3000));
+    await typeText("clear\n");
+    await new Promise(r => setTimeout(r, 1500));
   }
   console.log(`nextlevel reached bandit2 after ${secs()}`);
   ok = errors.length === 0;

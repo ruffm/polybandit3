@@ -36,8 +36,15 @@ on:
       builder_ref:
         description: Branch, tag or commit of giacobe/buildroot-builder2 (blank = pinned commit)
         default: ''
+      baseline_tag:
+        description: Baseline release to package on (blank = pinned BASELINE_TAG, else a promoted release matching the config)
+        default: ''
+      allow_prerelease_baseline:
+        description: Allow a pre-release baseline (to test one before promoting it)
+        type: boolean
+        default: false
       force_rebuild:
-        description: Ignore the cached baseline and rebuild it
+        description: Ignore published and cached baselines and rebuild from source
         type: boolean
         default: false
 
@@ -59,6 +66,11 @@ env:
   # To update: use the latest commit from github.com/giacobe/buildroot-builder2.
   BUILDER_REF: ${{ inputs.builder_ref || 'b6fb25fcadbd536a64ca7116f1c12e6daa7b5fd8' }}
   V86_VERSION: '0.5.473'
+  # Known-good base to package on, published by baseline.yml. Set this to a
+  # promoted release tag to pin it. Blank: use a promoted release whose config
+  # hash matches, if there is one, else the cache, else build from source.
+  BASELINE_TAG: ${{ inputs.baseline_tag || '' }}
+  BASELINE_REPO: ${{ github.repository }}   # or another repo that publishes baselines
 
 jobs:
   build:
@@ -74,17 +86,20 @@ jobs:
             payload_dir: bandit             # folder packaged into /root
             installer: installbandit.sh     # becomes /root/install.sh
             output_prefix: polybandit3
+            solvers: ''                     # no reference solvers for v3 yet
           - variant: v3.1
             flavor: v31
             payload_dir: polybandit3.1
             installer: install.sh
             output_prefix: polybandit3.1
+            solvers: solvers/polybandit3.1  # run at every level by the boot test
     env:
       VARIANT: ${{ matrix.variant }}
       FLAVOR: ${{ matrix.flavor }}
       PAYLOAD_DIR: ${{ matrix.payload_dir }}
       INSTALLER: ${{ matrix.installer }}
       OUTPUT_PREFIX: ${{ matrix.output_prefix }}
+      SOLVERS: ${{ matrix.solvers }}
     steps:
       - name: Check out payload (this repo)
         uses: actions/checkout@v6
@@ -119,22 +134,73 @@ jobs:
           h=$(cat builder/config-sets/"$CONFIG_SET"/* builder/scripts/02-build-baseline.sh | sha256sum | cut -c1-16)
           echo "baseline=baseline-${CONFIG_SET}-br${BUILDROOT_VERSION}-${h}" >> "$GITHUB_OUTPUT"
 
+      - name: Use published baseline release
+        id: published
+        if: ${{ !inputs.force_rebuild }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALLOW_PRE: ${{ inputs.allow_prerelease_baseline }}
+          KEY: ${{ steps.key.outputs.baseline }}
+        run: |
+          pinned=$BASELINE_TAG
+          h=${KEY##*-}
+          tag=${pinned:-baseline-${CONFIG_SET}-br${BUILDROOT_VERSION}-${h:0:10}}
+          if ! info=$(gh release view "$tag" -R "$BASELINE_REPO" --json isPrerelease 2>/dev/null); then
+            [ -z "$pinned" ] || { echo "::error::Pinned baseline $tag not found in $BASELINE_REPO"; exit 1; }
+            echo "No published baseline $tag; using cache or building."
+            echo "found=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$(jq -r .isPrerelease <<<"$info")" = true ] && [ "$ALLOW_PRE" != true ]; then
+            if [ -n "$pinned" ]; then
+              echo "::error::$tag is a pre-release (not yet promoted). Check allow_prerelease_baseline to test it."; exit 1
+            fi
+            echo "::notice::$tag exists but is not promoted yet; using cache or building."
+            echo "found=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          gh release download "$tag" -R "$BASELINE_REPO" -D dl \
+            -p bzImage -p rootfs.cpio.gz -p baseline-manifest.tar.gz -p baseline.json -p SHA256SUMS
+          (cd dl && sha256sum -c SHA256SUMS)
+          mkdir -p baseline/images
+          mv dl/bzImage dl/rootfs.cpio.gz baseline/images/
+          tar -xzf dl/baseline-manifest.tar.gz -C baseline
+          cp dl/baseline.json baseline/manifest/
+          if [ -z "$pinned" ] && [ "$(jq -r .config_hash dl/baseline.json)" != "$h" ]; then
+            echo "::error::$tag was built from a different config (hash mismatch)"; exit 1
+          fi
+          echo "Using baseline release $tag from $BASELINE_REPO"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Restore cached baseline
         id: baseline-cache
-        if: ${{ !inputs.force_rebuild }}
+        if: ${{ !inputs.force_rebuild && steps.published.outputs.found != 'true' }}
         uses: actions/cache/restore@v5
         with:
           path: baseline
           key: ${{ steps.key.outputs.baseline }}
 
+      - name: Decide whether to build the baseline
+        id: need
+        env:
+          PUBLISHED: ${{ steps.published.outputs.found }}
+          CACHED: ${{ steps.baseline-cache.outputs.cache-hit }}
+          TAG: ${{ steps.published.outputs.tag }}
+        run: |
+          if [ "$PUBLISHED" = true ]; then src="release \`$TAG\`"; build=false
+          elif [ "$CACHED" = true ]; then src="Actions cache"; build=false
+          else src="built from source in this run"; build=true; fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "**${VARIANT}** packaged on baseline: $src" >> "$GITHUB_STEP_SUMMARY"
+          echo "Baseline source: $src"
+
       - name: Free disk space for Buildroot
-        if: steps.baseline-cache.outputs.cache-hit != 'true'
+        if: steps.need.outputs.build == 'true'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
       - name: Restore Buildroot download cache
-        if: steps.baseline-cache.outputs.cache-hit != 'true'
+        if: steps.need.outputs.build == 'true'
         uses: actions/cache@v5
         with:
           path: br-dl
@@ -142,11 +208,11 @@ jobs:
           restore-keys: br-dl-${{ env.BUILDROOT_VERSION }}-
 
       - name: Set up Buildroot
-        if: steps.baseline-cache.outputs.cache-hit != 'true'
+        if: steps.need.outputs.build == 'true'
         run: bash builder/scripts/01-setup-buildroot.sh
 
       - name: Build baseline (kernel + rootfs)
-        if: steps.baseline-cache.outputs.cache-hit != 'true'
+        if: steps.need.outputs.build == 'true'
         env:
           BR2_DL_DIR: ${{ github.workspace }}/br-dl
           # JOBS is left unset: 02-build-baseline.sh defaults to every CPU core.
@@ -170,7 +236,7 @@ jobs:
       - name: Save baseline cache
         # On a cold cache both variants build the baseline; whichever finishes
         # second only logs a warning that the key already exists.
-        if: steps.baseline-cache.outputs.cache-hit != 'true'
+        if: steps.need.outputs.build == 'true'
         uses: actions/cache/save@v5
         with:
           path: baseline
@@ -217,7 +283,8 @@ jobs:
             --flavor "$FLAVOR" \
             --kernel out/"$OUTPUT_PREFIX".bzImage \
             --initrd out/"$OUTPUT_PREFIX".rootfs.cpio.gz \
-            --levels 13 --log out/boot.log ${{ steps.kvm.outputs.flag }}
+            --levels 13 --log out/boot.log ${{ steps.kvm.outputs.flag }} \
+            ${SOLVERS:+--solvers payload/"$SOLVERS"}
 
       - name: Upload boot log
         if: always()

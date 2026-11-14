@@ -80,7 +80,7 @@ done
 [ "$INSTALLER" = install.sh ] || [ ! -e "$tmp/root/$INSTALLER" ] || err "$INSTALLER should have been renamed to install.sh"
 
 # Only the payload folder belongs in the image: no CI files, other labs, or saved sessions.
-for f in .github web "bandit current status.txt" basic1.sh level1FM.sh TJInstall.sh dictionaries etc polybandit3.1 bandit; do
+for f in .github web "bandit current status.txt" basic1.sh level1FM.sh TJInstall.sh dictionaries etc polybandit3.1 bandit solvers; do
   [ ! -e "$tmp/root/$f" ] || err "unexpected file in /root: $f (package with --payload-subdir $PAYLOAD)"
 done
 
