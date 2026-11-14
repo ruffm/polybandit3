@@ -1,26 +1,29 @@
 # PolyLinuxGame
  Polymorphic Lab built for Buildroot Linux
 
-## PolyBandit v3 image
+## Layout
 
-(For PolyBandit 3.1, see [below](#polybandit-31-subtree).)
+| Folder | What it is |
+|---|---|
+| [`polybandit3.0/`](polybandit3.0/) | PolyBandit 3.0, the original thirteen-level game |
+| [`polybandit3.1/`](polybandit3.1/) | PolyBandit 3.1, [giacobe/polybandit3.1](https://github.com/giacobe/polybandit3.1) kept as a git subtree |
+| [`web/`](web/) | The v86 browser page and the landing page published to GitHub Pages |
+| [`.github/`](.github/) | CI: image builds, tests, baseline releases, Pages deploy |
+| [`legacy/`](legacy/) | Files from earlier PolyLinux labs (basic, file manipulation, TJ). Not built or packaged. |
 
-The PolyBandit v3 game lives in [`bandit/`](bandit/). That folder is exactly
-what gets copied into `/root` of the image; nothing else in this repo is packaged.
+Each game folder is exactly what gets copied into `/root` of its image;
+nothing else in this repo is packaged.
 
-`bandit/installbandit.sh` becomes `/root/install.sh`, which `.profile` runs at
-login. It builds bandit levels 1–13 in parallel, waits for them, then logs the
-student in as `bandit1`.
+### PolyBandit 3.0
 
-`profile`, `.profile`, `nextlevel` and `prevlevel` also exist at the repo root
-for the older labs; keep the two copies in sync when changing them.
+`polybandit3.0/installbandit.sh` becomes `/root/install.sh`, which `.profile`
+runs at login. It builds bandit levels 1–13 in parallel, waits for them, then
+logs the student in as `bandit1`.
 
 ### PolyBandit 3.1 (subtree)
 
-[`polybandit3.1/`](polybandit3.1/) is
-[giacobe/polybandit3.1](https://github.com/giacobe/polybandit3.1) kept as a git
-subtree, with its own history and GPL-3.0 license. Don't edit it here; pull
-Nick's updates with:
+`polybandit3.1/` has its own history and GPL-3.0 license. Don't edit it here;
+send changes upstream to giacobe/polybandit3.1 and pull them in with:
 
 ```sh
 git subtree pull --prefix polybandit3.1 https://github.com/giacobe/polybandit3.1 main
@@ -35,7 +38,7 @@ request and weekly, one per version, with
 
 | Check | Folder packaged into `/root` | Installer | Image files |
 |---|---|---|---|
-| `build (v3)` | `bandit/` | `installbandit.sh` | `polybandit3.*` |
+| `build (v3)` | `polybandit3.0/` | `installbandit.sh` | `polybandit3.*` |
 | `build (v3.1)` | `polybandit3.1/` | `install.sh` | `polybandit3.1.*` |
 
 Both package on the same kernel/base system (see [Baseline releases](#baseline-releases)),
@@ -46,10 +49,7 @@ so most runs only repackage. Each version is then tested:
   command and that `/root` matches the packaged folder byte for byte;
 - `.github/scripts/boot-test.py --flavor v3|v31` boots it in QEMU, enters a
   test email, checks bandit1's answer (and 3.1's exercise code) and walks
-  `nextlevel` through bandit13. For 3.1 it also runs the reference solvers
-  in [`solvers/polybandit3.1/`](solvers/polybandit3.1/) at every level, as that
-  level's user, and checks each prints the expected answer. The solvers use
-  the tool each level teaches and are never packaged into the image;
+  `nextlevel` through bandit13;
 - `.github/scripts/assemble-site.sh` builds the browser version (`web/index.html`
   plus [v86](https://github.com/copy/v86) and the image), and
   `.github/scripts/page-test.mjs` plays it in headless Chrome up to bandit2.

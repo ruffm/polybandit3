@@ -1,7 +1,7 @@
 name: Build PolyBandit images
 
 # Builds one image (bzImage + rootfs.cpio.gz) per PolyBandit version:
-#   v3    the original game in bandit/
+#   v3    the original game in polybandit3.0/
 #   v3.1  giacobe/polybandit3.1, kept as a git subtree in polybandit3.1/
 # Both use the same Buildroot baseline (cached, built once):
 #   01-setup-buildroot.sh  -> download Buildroot
@@ -83,23 +83,20 @@ jobs:
         include:
           - variant: v3
             flavor: v3                      # boot-test.py / verify-image.sh mode
-            payload_dir: bandit             # folder packaged into /root
+            payload_dir: polybandit3.0      # folder packaged into /root
             installer: installbandit.sh     # becomes /root/install.sh
             output_prefix: polybandit3
-            solvers: ''                     # no reference solvers for v3 yet
           - variant: v3.1
             flavor: v31
             payload_dir: polybandit3.1
             installer: install.sh
             output_prefix: polybandit3.1
-            solvers: solvers/polybandit3.1  # run at every level by the boot test
     env:
       VARIANT: ${{ matrix.variant }}
       FLAVOR: ${{ matrix.flavor }}
       PAYLOAD_DIR: ${{ matrix.payload_dir }}
       INSTALLER: ${{ matrix.installer }}
       OUTPUT_PREFIX: ${{ matrix.output_prefix }}
-      SOLVERS: ${{ matrix.solvers }}
     steps:
       - name: Check out payload (this repo)
         uses: actions/checkout@v6
@@ -283,8 +280,7 @@ jobs:
             --flavor "$FLAVOR" \
             --kernel out/"$OUTPUT_PREFIX".bzImage \
             --initrd out/"$OUTPUT_PREFIX".rootfs.cpio.gz \
-            --levels 13 --log out/boot.log ${{ steps.kvm.outputs.flag }} \
-            ${SOLVERS:+--solvers payload/"$SOLVERS"}
+            --levels 13 --log out/boot.log ${{ steps.kvm.outputs.flag }}
 
       - name: Upload boot log
         if: always()
