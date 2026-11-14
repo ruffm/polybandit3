@@ -1,17 +1,21 @@
 name: Build PolyBandit v3 image
 
-# Builds v86-bootable PolyBandit v3 image by using buildroot-builder2:
+# Builds PolyBandit v3 image (bzImage + rootfs.cpio.gz):
 #   01-setup-buildroot.sh  -> download Buildroot
-#   02-build-baseline.sh   -> build kernel + baseline rootfs   (slow, cached)
-#   03-package-payload.sh  -> merge this repo into /root       (seconds)
-# The baseline is only rebuilt when the Buildroot version, the config set or
-# the builder's build script changes, so most runs only repackage the payload.
+#   02-build-baseline.sh   -> build kernel + baseline rootfs
+#   03-package-payload.sh  -> merge this repo into /root
 
 on:
   push:
     branches: [main, master]
-    tags: ['v*']
+    tags: ['v*']          # path filters below don't apply to tag pushes
+    paths-ignore: ['**.md', 'LICENSE']
   pull_request:
+    paths-ignore: ['**.md', 'LICENSE']
+  schedule:
+    # Weekly run keeps the baseline cache alive (GitHub evicts caches unused
+    # for 7 days). With a warm cache this is a few minutes of packaging + tests.
+    - cron: '17 6 * * 1'
   workflow_dispatch:
     inputs:
       config_set:
@@ -23,8 +27,8 @@ on:
         description: Buildroot release (config sets are validated on 2025.02.15)
         default: '2025.02.15'
       builder_ref:
-        description: Branch, tag or commit of giacobe/buildroot-builder2
-        default: main
+        description: Branch, tag or commit of giacobe/buildroot-builder2 (blank = pinned commit)
+        default: ''
       force_rebuild:
         description: Ignore the cached baseline and rebuild it
         type: boolean
@@ -32,7 +36,9 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Only cancel superseded PR runs. Cancelling a push run mid-baseline would
+  # throw away up to an hour of Buildroot work before it reaches the cache.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: write   # needed only to attach images to a release on tag pushes
@@ -42,7 +48,9 @@ env:
   # xxd, strings, base64, file, md5sum, sha256sum (hexdump is a BusyBox applet).
   CONFIG_SET: ${{ inputs.config_set || 'basic-compression' }}
   BUILDROOT_VERSION: ${{ inputs.buildroot_version || '2025.02.15' }}
-  BUILDER_REF: ${{ inputs.builder_ref || 'main' }}
+  # Pinned so builder changes only reach these images when you bump this SHA.
+  # To update: use the latest commit from github.com/giacobe/buildroot-builder2.
+  BUILDER_REF: ${{ inputs.builder_ref || 'b6fb25fcadbd536a64ca7116f1c12e6daa7b5fd8' }}
   # Which installer becomes /root/install.sh (the one .profile runs at login).
   INSTALLER: installbandit.sh
   OUTPUT_PREFIX: polybandit3
@@ -64,6 +72,15 @@ jobs:
           repository: giacobe/buildroot-builder2
           ref: ${{ env.BUILDER_REF }}
           path: builder
+
+      - name: Drop Buildroot's host QEMU (CI installs QEMU from apt instead)
+        run: |
+          # BR2_PACKAGE_HOST_QEMU only builds a QEMU for local boot testing; it
+          # adds a long host build and doesn't change bzImage or rootfs.cpio.gz.
+          for f in builder/config-sets/"$CONFIG_SET"/defconfig builder/config-sets/"$CONFIG_SET"/features.fragment; do
+            [ -f "$f" ] && sed -i '/^BR2_PACKAGE_HOST_QEMU/d' "$f"
+          done
+          ! grep -h '^BR2_PACKAGE_HOST_QEMU' builder/config-sets/"$CONFIG_SET"/* 
 
       - name: Compute baseline cache key
         id: key
@@ -101,7 +118,7 @@ jobs:
         if: steps.baseline-cache.outputs.cache-hit != 'true'
         env:
           BR2_DL_DIR: ${{ github.workspace }}/br-dl
-          JOBS: 4
+          # JOBS is left unset: 02-build-baseline.sh defaults to every CPU core.
         run: |
           # The builder repo commits its scripts without +x, so call them via bash.
           # Buildroot refuses to run with "." or empty entries in these.
