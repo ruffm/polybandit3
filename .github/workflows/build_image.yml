@@ -99,7 +99,7 @@ jobs:
       OUTPUT_PREFIX: ${{ matrix.output_prefix }}
     steps:
       - name: Check out payload (this repo)
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           path: payload
           fetch-depth: 0   # 03-package-payload.sh clones this and checks out the SHA
@@ -110,7 +110,7 @@ jobs:
         run: sh test.sh
 
       - name: Check out buildroot-builder2
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: giacobe/buildroot-builder2
           ref: ${{ env.BUILDER_REF }}
@@ -171,7 +171,7 @@ jobs:
       - name: Restore cached baseline
         id: baseline-cache
         if: ${{ !inputs.force_rebuild && steps.published.outputs.found != 'true' }}
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: baseline
           key: ${{ steps.key.outputs.baseline }}
@@ -198,7 +198,7 @@ jobs:
 
       - name: Restore Buildroot download cache
         if: steps.need.outputs.build == 'true'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: br-dl
           key: br-dl-${{ env.BUILDROOT_VERSION }}-${{ steps.key.outputs.baseline }}
@@ -224,7 +224,7 @@ jobs:
 
       - name: Upload build logs on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: buildroot-logs-${{ matrix.variant }}
           path: builder/artifacts/*/logs/
@@ -234,7 +234,7 @@ jobs:
         # On a cold cache both variants build the baseline; whichever finishes
         # second only logs a warning that the key already exists.
         if: steps.need.outputs.build == 'true'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: baseline
           key: ${{ steps.key.outputs.baseline }}
@@ -284,14 +284,14 @@ jobs:
 
       - name: Upload boot log
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: boot-log-${{ matrix.variant }}-${{ github.sha }}
           path: out/boot.log
           if-no-files-found: ignore
 
       - name: Check out v86 BIOS files
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: copy/v86
           ref: 315b2b0b758703ef0e6cc7b4088d6068f83f3c20   # pinned; bump with V86_VERSION
@@ -318,14 +318,14 @@ jobs:
 
       - name: Upload page screenshots
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: page-screenshots-${{ matrix.variant }}-${{ github.sha }}
           path: out/page-shots/
           if-no-files-found: ignore
 
       - name: Upload site for the Pages deploy
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: site-${{ matrix.variant }}
           path: site/
@@ -335,7 +335,7 @@ jobs:
         run: cd out && sha256sum "$OUTPUT_PREFIX".bzImage "$OUTPUT_PREFIX".rootfs.cpio.gz | tee SHA256SUMS-"$VARIANT"
 
       - name: Upload image
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.output_prefix }}-${{ env.CONFIG_SET }}-${{ github.sha }}
           path: |
@@ -377,13 +377,13 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Check out landing page
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           sparse-checkout: web
           sparse-checkout-cone-mode: false
 
       - name: Download both sites
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: site-*
           path: sites
