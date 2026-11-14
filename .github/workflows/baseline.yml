@@ -1,0 +1,200 @@
+name: Publish baseline
+
+# Builds the Buildroot kernel + base rootfs once and publishes it as a GitHub
+# release, so lab builds (here, in forks, or in other repos) can package on
+# top of a fixed, known-good base instead of rebuilding Buildroot.
+#
+# Lifecycle:
+#   1. Run this workflow (Actions -> Publish baseline -> Run workflow).
+#      It builds, smoke-boots the bare base in QEMU and publishes a
+#      PRE-RELEASE named baseline-<config>-br<version>-<confighash>.
+#   2. Test it: run "Build PolyBandit images" with baseline_tag set to that
+#      tag and allow_prerelease_baseline checked. Both versions must pass.
+#   3. Promote it to known good:
+#        gh release edit <tag> --prerelease=false --latest=false
+#      Lab builds only use promoted (non-pre-release) baselines by default.
+#
+# Releases are immutable by convention: if the tag exists, this workflow stops.
+# A different config, Buildroot version or build script gives a new tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_set:
+        description: buildroot-builder2 config set
+        default: basic-compression
+        type: choice
+        options: [basic, basic-compression, basic-compression-networking, basic-processes]
+      buildroot_version:
+        description: Buildroot release
+        default: '2025.02.15'
+      builder_ref:
+        description: Branch, tag or commit of giacobe/buildroot-builder2
+        default: b6fb25fcadbd536a64ca7116f1c12e6daa7b5fd8
+
+permissions:
+  contents: write   # create the release
+
+concurrency:
+  group: baseline-${{ inputs.config_set }}-${{ inputs.buildroot_version }}
+  cancel-in-progress: false
+
+env:
+  CONFIG_SET: ${{ inputs.config_set }}
+  BUILDROOT_VERSION: ${{ inputs.buildroot_version }}
+
+jobs:
+  baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Check out buildroot-builder2
+        uses: actions/checkout@v6
+        with:
+          repository: giacobe/buildroot-builder2
+          ref: ${{ inputs.builder_ref }}
+          path: builder
+
+      - name: Drop Buildroot's host QEMU (not part of the image)
+        run: |
+          for f in builder/config-sets/"$CONFIG_SET"/defconfig builder/config-sets/"$CONFIG_SET"/features.fragment; do
+            [ -f "$f" ] && sed -i '/^BR2_PACKAGE_HOST_QEMU/d' "$f"
+          done
+          ! grep -h '^BR2_PACKAGE_HOST_QEMU' builder/config-sets/"$CONFIG_SET"/*
+
+      - name: Work out the release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Same hash as build_image.yml's cache key and baseline lookup.
+          h=$(cat builder/config-sets/"$CONFIG_SET"/* builder/scripts/02-build-baseline.sh | sha256sum | cut -c1-16)
+          tag="baseline-${CONFIG_SET}-br${BUILDROOT_VERSION}-${h:0:10}"
+          echo "hash=$h" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "builder_sha=$(git -C builder rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists. Baselines are immutable; delete it first if you really mean to rebuild it."
+            exit 1
+          fi
+          echo "Will publish $tag"
+
+      - name: Free disk space for Buildroot
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Restore Buildroot download cache
+        uses: actions/cache@v5
+        with:
+          path: br-dl
+          key: br-dl-${{ env.BUILDROOT_VERSION }}-baseline-${{ env.CONFIG_SET }}-br${{ env.BUILDROOT_VERSION }}-${{ steps.tag.outputs.hash }}
+          restore-keys: br-dl-${{ env.BUILDROOT_VERSION }}-
+
+      - name: Build baseline (kernel + rootfs)
+        env:
+          BR2_DL_DIR: ${{ github.workspace }}/br-dl
+        run: |
+          unset LD_LIBRARY_PATH PERL_MM_OPT
+          BUILDROOT_VERSION="$BUILDROOT_VERSION" bash builder/scripts/01-setup-buildroot.sh
+          bash builder/scripts/02-build-baseline.sh --config "$CONFIG_SET"
+          dir=$(ls -d builder/artifacts/"$CONFIG_SET"-* | sort | tail -n1)
+          mkdir -p baseline
+          cp -a "$dir"/. baseline/
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: baseline-build-logs
+          path: builder/artifacts/*/logs/
+          if-no-files-found: ignore
+
+      - name: Smoke test (bare base boots to a login prompt)
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 python3-pexpect
+          python3 - <<'PY'
+          import pexpect, sys
+          vm = pexpect.spawn("qemu-system-i386 -m 256M -nographic -no-reboot "
+                             "-kernel baseline/images/bzImage -initrd baseline/images/rootfs.cpio.gz "
+                             "-append 'console=ttyS0 panic=-1'", encoding="utf-8",
+                             codec_errors="replace", timeout=300)
+          vm.logfile_read = open("baseline-smoke.log", "w")
+          i = vm.expect([r"login: ?", r"Kernel panic[^\r\n]*", pexpect.EOF])
+          if i != 0:
+              print(f"::error::bare baseline did not reach a login prompt: {vm.after}")
+              sys.exit(1)
+          print("bare baseline boots to a login prompt")
+          vm.terminate(force=True)
+          PY
+
+      - name: Assemble release files
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          HASH: ${{ steps.tag.outputs.hash }}
+          BUILDER_SHA: ${{ steps.tag.outputs.builder_sha }}
+        run: |
+          mkdir -p dist
+          cp baseline/images/bzImage baseline/images/rootfs.cpio.gz dist/
+          # Everything except the images, for provenance: configs, manifest, logs.
+          tar -czf dist/baseline-manifest.tar.gz -C baseline configs manifest logs
+          python3 - <<'PY'
+          import hashlib, json, os, datetime
+          def sha(p): return hashlib.sha256(open(p, "rb").read()).hexdigest()
+          info = {
+              "tag": os.environ["TAG"],
+              "config_set": os.environ["CONFIG_SET"],
+              "buildroot_version": os.environ["BUILDROOT_VERSION"],
+              "config_hash": os.environ["HASH"],
+              "builder_repo": "giacobe/buildroot-builder2",
+              "builder_commit": os.environ["BUILDER_SHA"],
+              "host_qemu_removed": True,
+              "kernel_sha256": sha("dist/bzImage"),
+              "rootfs_sha256": sha("dist/rootfs.cpio.gz"),
+              "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+              "built_by": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+          }
+          json.dump(info, open("dist/baseline.json", "w"), indent=2)
+          PY
+          (cd dist && sha256sum bzImage rootfs.cpio.gz baseline-manifest.tar.gz baseline.json > SHA256SUMS)
+          cat dist/baseline.json dist/SHA256SUMS
+          cat > notes.md <<EOF
+          Buildroot base for PolyLinux labs: kernel + base rootfs, no lab payload.
+
+          | | |
+          |---|---|
+          | Config set | \`$CONFIG_SET\` |
+          | Buildroot | $BUILDROOT_VERSION |
+          | Builder | giacobe/buildroot-builder2 @ \`${BUILDER_SHA:0:12}\` |
+          | Config hash | \`$HASH\` |
+
+          **Status:** pre-release until tested. Promote with
+          \`gh release edit $TAG --prerelease=false --latest=false\`.
+
+          Use it from a lab build:
+          \`\`\`sh
+          gh release download $TAG -R $GITHUB_REPOSITORY -D baseline/images -p bzImage -p rootfs.cpio.gz
+          scripts/03-package-payload.sh --baseline baseline ...
+          \`\`\`
+          EOF
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "Baseline: $CONFIG_SET, Buildroot $BUILDROOT_VERSION (${TAG##*-})" \
+            --notes-file notes.md \
+            dist/bzImage dist/rootfs.cpio.gz dist/baseline-manifest.tar.gz dist/baseline.json dist/SHA256SUMS
+          {
+            echo "### Published pre-release \`$TAG\`"
+            echo "Next: run **Build PolyBandit images** with \`baseline_tag: $TAG\` and"
+            echo "\`allow_prerelease_baseline\` checked. If both versions pass, promote it:"
+            echo '```'
+            echo "gh release edit $TAG --prerelease=false --latest=false"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
