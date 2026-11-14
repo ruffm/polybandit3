@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PolyBandit v3</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230b0d10'/%3E%3Ctext x='5' y='23' font-family='monospace' font-size='18' fill='%234fb3ff'%3E%3E_%3C/text%3E%3C/svg%3E">
+<style>
+  :root { --bg: #0b0d10; --panel: #14181d; --text: #d7dde4; --muted: #8b96a3; --accent: #4fb3ff; --ok: #5fd38d; --warn: #f2c14e; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid #222a33; background: var(--panel); }
+  h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: .2px; }
+  h1 span { color: var(--accent); }
+  #status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
+  #status i { width: 9px; height: 9px; border-radius: 50%; background: var(--warn); display: inline-block; }
+  #status.ready i { background: var(--ok); }
+  .spacer { flex: 1; }
+  button { font: inherit; font-size: 14px; color: var(--text); background: #1d232b;
+    border: 1px solid #2c3540; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  main { display: flex; flex-direction: column; align-items: center; padding: 20px; gap: 12px; }
+  #screen_container { background: #000; padding: 6px; border-radius: 6px;
+    box-shadow: 0 0 0 1px #222a33, 0 10px 30px rgba(0,0,0,.45); outline: none; }
+  #screen_container:focus-within, #screen_container:focus { box-shadow: 0 0 0 2px var(--accent); }
+  #screen_container > div { white-space: pre; font: 15px/18px "DejaVu Sans Mono", Menlo, Consolas, monospace; color: #c0c0c0; }
+  #screen_container canvas { display: none; }
+  #help { max-width: 760px; color: var(--muted); font-size: 14px; text-align: center; }
+  #help code { color: var(--text); background: #1d232b; padding: 1px 5px; border-radius: 4px; }
+  footer { color: #5d6875; font-size: 12px; text-align: center; padding: 8px 0 20px; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Poly<span>Bandit</span> v3</h1>
+  <div id="status"><i></i><span id="status-text">Downloading the virtual machine…</span></div>
+  <div class="spacer"></div>
+  <button id="ctrlc" title="Send Ctrl+C to the terminal">Ctrl+C</button>
+  <button id="restart" title="Start over with a fresh machine (your progress is lost)">Restart</button>
+</header>
+<main>
+  <div id="screen_container" tabindex="0">
+    <div></div>
+    <canvas></canvas>
+  </div>
+  <p id="help">
+    Click the terminal and type. Enter your Penn State email when asked, then follow the
+    instructions on screen. Use <code>nextlevel</code> and <code>prevlevel</code> to move between levels.
+    Everything runs in your browser; reloading the page starts over.
+  </p>
+</main>
+<footer>
+  Build <span id="build">dev</span> · runs on <a href="https://github.com/copy/v86">v86</a>
+</footer>
+
+<script src="v86/libv86.js"></script>
+<script>
+"use strict";
+// build.json is written by CI (commit, date); absent when testing locally.
+fetch("build.json").then(r => r.ok ? r.json() : null).then(b => {
+  if (b) document.getElementById("build").textContent = b.label;
+}).catch(() => {});
+
+const statusEl = document.getElementById("status");
+const statusText = document.getElementById("status-text");
+const setStatus = (text, ready) => { statusText.textContent = text; statusEl.classList.toggle("ready", !!ready); };
+
+const emulator = new V86({
+  wasm_path: "v86/v86.wasm",
+  memory_size: 256 * 1024 * 1024,
+  vga_memory_size: 8 * 1024 * 1024,
+  screen_container: document.getElementById("screen_container"),
+  bios: { url: "v86/seabios.bin" },
+  vga_bios: { url: "v86/vgabios.bin" },
+  bzimage: { url: "images/polybandit3.bzImage" },
+  initrd: { url: "images/polybandit3.rootfs.cpio.gz" },
+  // console=ttyS0: kernel messages and the spare getty go to the (unseen)
+  // serial port, so the screen shows only the tty1 login, answered below.
+  // nomodeset: keeps bochs-drm from taking over the VGA card, which would
+  // switch the text console off and leave the screen blank.
+  cmdline: "console=ttyS0 nomodeset tsc=reliable mitigations=off random.trust_cpu=on",
+  autostart: true,
+});
+
+emulator.add_listener("download-progress", e => {
+  if (e.total) setStatus(`Downloading… ${Math.round(100 * e.loaded / e.total)}%`);
+});
+emulator.add_listener("emulator-ready", () => setStatus("Booting Linux…"));
+
+// Log in as root when tty1 shows its login prompt; root's .profile then runs
+// the PolyBandit installer. Rows of the text screen are tracked from
+// screen-put-char events.
+const rows = [];
+let loggedIn = false;
+emulator.add_listener("screen-put-char", ([row, col, chr]) => {
+  if (loggedIn) return;
+  const line = rows[row] || (rows[row] = []);
+  line[col] = String.fromCharCode(chr);
+  const text = line.join("");
+  if (text.includes("login:")) {
+    loggedIn = true;
+    setTimeout(() => {
+      emulator.keyboard_send_text("root\n");
+      setStatus("Ready — click the terminal and type", true);
+      document.getElementById("screen_container").focus();
+    }, 300);
+  }
+});
+
+document.getElementById("restart").onclick = () => location.reload();
+document.getElementById("ctrlc").onclick = () => {
+  // Ctrl down, C, C up, Ctrl up (PS/2 set 1 scancodes)
+  emulator.keyboard_send_scancodes([0x1D, 0x2E, 0xAE, 0x9D]);
+  document.getElementById("screen_container").focus();
+};
+
+// Expose for debugging in the browser console.
+window.emulator = emulator;
+</script>
+</body>
+</html>

@@ -4,14 +4,17 @@ name: Build PolyBandit v3 image
 #   01-setup-buildroot.sh  -> download Buildroot
 #   02-build-baseline.sh   -> build kernel + baseline rootfs
 #   03-package-payload.sh  -> merge bandit/ into /root
+# then tests it (image check, QEMU boot test, browser play test of the v86
+# page) and, for pushes to the default branch, publishes the page to GitHub Pages.
 
 on:
   push:
     branches: [main, master]
     tags: ['v*']          # path filters below don't apply to tag pushes
     paths-ignore: ['**.md', 'LICENSE']
+  # No path filters on PRs: "build" is a required check, so it must report
+  # on every PR, even docs-only ones.
   pull_request:
-    paths-ignore: ['**.md', 'LICENSE']
   schedule:
     # Weekly run keeps the baseline cache alive (GitHub evicts caches unused
     # for 7 days). With a warm cache this is a few minutes of packaging + tests.
@@ -190,6 +193,47 @@ jobs:
           path: out/boot.log
           if-no-files-found: ignore
 
+      - name: Check out v86 BIOS files
+        uses: actions/checkout@v6
+        with:
+          repository: copy/v86
+          ref: 315b2b0b758703ef0e6cc7b4088d6068f83f3c20   # pinned; bump with V86_VERSION
+          path: v86src
+          sparse-checkout: bios
+          sparse-checkout-cone-mode: false
+
+      - name: Assemble v86 web page
+        env:
+          V86_VERSION: '0.5.473'
+        run: |
+          bash payload/.github/scripts/assemble-site.sh out v86src/bios site \
+            "${GITHUB_SHA::7} · $(date -u +%Y-%m-%d)"
+
+      - name: Browser test of the web page (headless Chrome)
+        timeout-minutes: 15
+        run: |
+          pt="$RUNNER_TEMP/page-test"
+          npm install --prefix "$pt" --silent --no-audit --no-fund puppeteer-core@24
+          cp payload/.github/scripts/page-test.mjs "$pt/"
+          python3 -m http.server 8080 --directory site --bind 127.0.0.1 >/dev/null 2>&1 &
+          node "$pt/page-test.mjs" http://127.0.0.1:8080/ out/page-shots
+
+      - name: Upload page screenshots
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: page-screenshots-${{ github.sha }}
+          path: out/page-shots/
+          if-no-files-found: ignore
+
+      - name: Upload Pages site
+        if: >-
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
       - name: Write checksums
         run: cd out && sha256sum "$OUTPUT_PREFIX".bzImage "$OUTPUT_PREFIX".rootfs.cpio.gz | tee SHA256SUMS
 
@@ -214,3 +258,24 @@ jobs:
             || gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --generate-notes
           gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber \
             out/"$OUTPUT_PREFIX".bzImage out/"$OUTPUT_PREFIX".rootfs.cpio.gz out/SHA256SUMS
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5

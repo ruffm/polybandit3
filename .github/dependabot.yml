@@ -1,0 +1,21 @@
+# Keeps the GitHub Actions used by .github/workflows/ up to date
+# (actions/checkout, cache, upload-artifact, upload-pages-artifact, deploy-pages).
+# Each update arrives as a pull request, and the full build + boot test +
+# browser test runs on it before you merge.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:23"
+      timezone: America/New_York
+    # One PR per week with every action update, instead of one PR per action.
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies", "ci"]
+    open-pull-requests-limit: 5
