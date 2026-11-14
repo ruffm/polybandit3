@@ -61,13 +61,13 @@ jobs:
     timeout-minutes: 300
     steps:
       - name: Check out payload (this repo)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: payload
           fetch-depth: 0   # 03-package-payload.sh clones this and checks out the SHA
 
       - name: Check out buildroot-builder2
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: giacobe/buildroot-builder2
           ref: ${{ env.BUILDER_REF }}
@@ -91,7 +91,7 @@ jobs:
       - name: Restore cached baseline
         id: baseline-cache
         if: ${{ !inputs.force_rebuild }}
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: baseline
           key: ${{ steps.key.outputs.baseline }}
@@ -104,7 +104,7 @@ jobs:
 
       - name: Restore Buildroot download cache
         if: steps.baseline-cache.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: br-dl
           key: br-dl-${{ env.BUILDROOT_VERSION }}-${{ steps.key.outputs.baseline }}
@@ -130,7 +130,7 @@ jobs:
 
       - name: Upload build logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: buildroot-logs
           path: builder/artifacts/*/logs/
@@ -138,7 +138,7 @@ jobs:
 
       - name: Save baseline cache
         if: steps.baseline-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: baseline
           key: ${{ steps.key.outputs.baseline }}
@@ -184,7 +184,7 @@ jobs:
 
       - name: Upload boot log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: boot-log-${{ github.sha }}
           path: out/boot.log
@@ -194,7 +194,7 @@ jobs:
         run: cd out && sha256sum "$OUTPUT_PREFIX".bzImage "$OUTPUT_PREFIX".rootfs.cpio.gz | tee SHA256SUMS
 
       - name: Upload image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ env.OUTPUT_PREFIX }}-${{ env.CONFIG_SET }}-${{ github.sha }}
           path: |

@@ -9,16 +9,28 @@
   5. `nextlevel` walks through every level up to the last one
 
 """
-import argparse, base64, hashlib, re, shlex, sys, time
+import argparse, base64, functools, hashlib, re, shlex, sys, time
 import pexpect
+
+# Flush every line so progress shows up live in the Actions log.
+print = functools.partial(print, flush=True)
 
 EMAIL = "ci-test@psu.edu"
 SYSTEM_PASSWORD = "systemPassword"      # from installbandit.sh
 LEVEL_PASSWORD_ROOT = "levelPassword"   # from installbandit.sh
 
 
-def fail(msg):
-    print(f"::error::boot test: {msg}")
+STAGE = ["starting"]
+
+
+def fail(msg, tail=""):
+    # Annotations keep only the first line of ::error::, so keep it one line and
+    # print the console tail as ordinary (collapsible) log lines.
+    if tail:
+        print("::group::Last console output")
+        print(tail)
+        print("::endgroup::")
+    print(f"::error::boot test failed while {STAGE[0]}: {msg}")
     sys.exit(1)
 
 
@@ -60,13 +72,15 @@ def main():
         start, end = f"__CS{marker[0]}__", f"__CE{marker[0]}__"
         # Markers are split with '' so the echoed command line can't match them.
         vm.sendline(f"echo {start[:4]}''{start[4:]}; {command}; echo {end[:4]}''{end[4:]}")
-        vm.expect_exact(start + "\r\n", timeout=timeout)
+        # The serial console ends lines with \r\r\n, so allow any number of \r.
+        vm.expect(re.escape(start) + r"\r*\n", timeout=timeout)
         vm.expect_exact(end, timeout=timeout)
         return ansi.sub("", vm.before).strip()
 
     try:
         # 1-2: boot to the installer, logging in as root if a getty is in the way
         t_boot = time.time()
+        STAGE[0] = "booting to the installer prompt"
         while True:
             i = vm.expect([r"login: ?", r"[Pp]assword: ?",
                            r"Enter your email address", r"Kernel panic.*"],
@@ -79,18 +93,21 @@ def main():
                 break
             else:
                 vm.expect([pexpect.TIMEOUT, pexpect.EOF], timeout=5)
-                fail("kernel panic during boot (see boot log)")
+                fail("kernel panic during boot", ansi.sub("", vm.after + (vm.before or ""))[-1500:])
         print(f"reached installer after {time.time() - t_boot:.0f}s")
+        STAGE[0] = "answering the installer prompts"
         vm.sendline(EMAIL)
         vm.expect(r"\(y/n\)")
         vm.sendline("y")
 
         # 3: installer finishes and logs us in as bandit1
+        STAGE[0] = "waiting for the installer to log in as bandit1"
         vm.expect_exact("Welcome to The PolyLinux Game", timeout=600)
         vm.expect(r"Level\s*:\s*bandit1")
         print("installer completed; logged in as bandit1")
         time.sleep(2)
 
+        STAGE[0] = "checking bandit1"
         who = run("whoami")
         if who != "bandit1":
             fail(f"expected to be bandit1, got {who!r}")
@@ -109,11 +126,17 @@ def main():
 
         # 5: walk the levels with nextlevel
         for n in range(2, a.levels + 1):
+            STAGE[0] = f"moving to bandit{n} with nextlevel"
             vm.sendline("nextlevel")
             # su may prompt for the (empty) password depending on PAM/shadow setup
-            if vm.expect([r"[Pp]assword: ?", rf"Level\s*:\s*bandit{n}\b"], timeout=60) == 0:
+            level = rf"Level\s*:\s*bandit{n}\b"
+            su_error = r"su: [^\r\n]+"
+            i = vm.expect([r"[Pp]assword: ?", level, su_error], timeout=60)
+            if i == 0:
                 vm.sendline("")
-                vm.expect(rf"Level\s*:\s*bandit{n}\b", timeout=60)
+                i = vm.expect([level, su_error], timeout=60) + 1
+            if i == 2:
+                fail(f"nextlevel failed: {vm.after.strip()}")
             readme = run("cat README.txt")
             if "Instructions for this level" not in readme:
                 fail(f"bandit{n} README.txt is missing its instructions header")
@@ -122,10 +145,10 @@ def main():
         time.sleep(1)
         print("boot test passed")
     except pexpect.TIMEOUT:
-        tail = (vm.before or "")[-800:]
-        fail(f"timed out; last console output:\n{tail}")
+        tail = ansi.sub("", vm.before or "")[-1500:]
+        fail("timed out (full console in the boot-log artifact)", tail)
     except pexpect.EOF:
-        fail("VM exited unexpectedly (see boot log)")
+        fail("VM exited unexpectedly (see the boot-log artifact)", ansi.sub("", vm.before or "")[-1500:])
     finally:
         vm.terminate(force=True)
         log.close()
