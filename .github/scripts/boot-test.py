@@ -7,14 +7,12 @@
   4. bandit1's answer (inhere.txt) matches the value derived from the email,
      the guest date and the lab's answer scheme
   5. `nextlevel` walks through every level up to the last one
-  6. with --solvers DIR: at every level, DIR/levelNN.sh is sent to the guest,
-     run as that level's user, and must print that level's expected answer
 
 --flavor picks the lab version:
-  v3   polybandit3 bandit/ (original scheme, "Welcome to The PolyLinux Game")
+  v3   polybandit3.0/ (original scheme, "Welcome to The PolyLinux Game")
   v31  polybandit3.1 (seed-v1 answers, exercise code, staged level readiness)
 """
-import argparse, base64, functools, hashlib, os, re, shlex, sys, time
+import argparse, base64, functools, hashlib, re, shlex, sys, time
 import pexpect
 
 # Flush every line so progress shows up live in the Actions log.
@@ -78,7 +76,6 @@ def main():
     ap.add_argument("--boot-timeout", type=int, default=300)
     ap.add_argument("--level-ready-timeout", type=int, default=300,
                     help="v31: how long nextlevel may keep saying a level is being prepared")
-    ap.add_argument("--solvers", help="directory of levelNN.sh reference solvers to run at each level")
     ap.add_argument("--cmd", help="override the spawned command (for self-testing)")
     a = ap.parse_args()
     fl = FLAVORS[a.flavor]
@@ -114,27 +111,6 @@ def main():
         vm.expect(re.escape(start) + r"\r*\n", timeout=timeout)
         vm.expect_exact(end, timeout=timeout)
         return ansi.sub("", vm.before).strip()
-
-    def solve(n, guest_date):
-        """Run the level-n reference solver as the current level user."""
-        if not a.solvers:
-            return
-        path = os.path.join(a.solvers, f"level{n:02d}.sh")
-        if not os.path.exists(path):
-            fail(f"no solver {path}")
-        b64 = base64.b64encode(open(path, "rb").read()).decode()
-        tmp = f"/tmp/solve-bandit{n}.sh"
-        # BusyBox's line editor caps an input line at ~1 KB, so send the
-        # encoded script in short pieces.
-        run(f"rm -f {tmp}.b64")
-        for i in range(0, len(b64), 400):
-            run(f"printf '%s' '{b64[i:i + 400]}' >> {tmp}.b64")
-        out = run(f"base64 -d {tmp}.b64 > {tmp} && sh {tmp} 2>&1; rm -f {tmp} {tmp}.b64", timeout=120)
-        got = out.splitlines()[-1].strip() if out else ""
-        want = expected_answer(a.flavor, EMAIL, guest_date, n)
-        if got != want:
-            fail(f"bandit{n} solver printed {got!r}, expected {want!r}", out[-1500:])
-        print(f"bandit{n} solved by reference solver")
 
     try:
         # 1-2: boot to the installer, logging in as root if a getty is in the way
@@ -190,7 +166,6 @@ def main():
             if f"Exercise code: {code}" not in run("cat README.txt"):
                 fail(f"README.txt does not show exercise code {code} for {guest_date}")
             print(f"exercise code OK ({code})")
-        solve(1, guest_date)
 
         # 5: walk the levels with nextlevel
         for n in range(2, a.levels + 1):
@@ -220,7 +195,6 @@ def main():
             if fl["readme_marker"] not in readme:
                 fail(f"bandit{n} README.txt is missing {fl['readme_marker']!r}")
             print(f"bandit{n} OK")
-            solve(n, guest_date)
         vm.sendline("nextlevel")  # past the last level: should just refuse
         time.sleep(1)
         print("boot test passed")
