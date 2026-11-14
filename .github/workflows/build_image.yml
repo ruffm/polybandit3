@@ -1,0 +1,168 @@
+name: Build PB v3
+# Builds a v86-bootable PolyBandit v3 image (bzImage + rootfs.cpio.gz) by
+# running giacobe/buildroot-builder2:
+#   01-setup-buildroot.sh  -> download Buildroot
+#   02-build-baseline.sh   -> build kernel + baseline rootfs   (slow, cached)
+#   03-package-payload.sh  -> merge this repo into /root       (seconds)
+
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      config_set:
+        description: buildroot-builder2 config set
+        default: basic-compression
+        type: choice
+        options: [basic, basic-compression, basic-compression-networking, basic-processes]
+      buildroot_version:
+        description: Buildroot release (config sets are validated on 2025.02.15)
+        default: '2025.02.15'
+      builder_ref:
+        description: Branch, tag or commit of giacobe/buildroot-builder2
+        default: main
+      force_rebuild:
+        description: Ignore the cached baseline and rebuild it
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # needed only to attach images to a release on tag pushes
+
+env:
+  # basic-compression covers what the bandit levels call: tar, gzip, bzip2,
+  # xxd, strings, base64, file, md5sum, sha256sum (hexdump is a BusyBox applet).
+  CONFIG_SET: ${{ inputs.config_set || 'basic-compression' }}
+  BUILDROOT_VERSION: ${{ inputs.buildroot_version || '2025.02.15' }}
+  BUILDER_REF: ${{ inputs.builder_ref || 'main' }}
+  # Which installer becomes /root/install.sh (the one .profile runs at login).
+  INSTALLER: installbandit.sh
+  OUTPUT_PREFIX: polybandit3
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Check out payload (this repo)
+        uses: actions/checkout@v4
+        with:
+          path: payload
+          fetch-depth: 0   # 03-package-payload.sh clones this and checks out the SHA
+
+      - name: Check out buildroot-builder2
+        uses: actions/checkout@v4
+        with:
+          repository: giacobe/buildroot-builder2
+          ref: ${{ env.BUILDER_REF }}
+          path: builder
+
+      - name: Compute baseline cache key
+        id: key
+        run: |
+          h=$(cat builder/config-sets/"$CONFIG_SET"/* builder/scripts/02-build-baseline.sh | sha256sum | cut -c1-16)
+          echo "baseline=baseline-${CONFIG_SET}-br${BUILDROOT_VERSION}-${h}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached baseline
+        id: baseline-cache
+        if: ${{ !inputs.force_rebuild }}
+        uses: actions/cache/restore@v4
+        with:
+          path: baseline
+          key: ${{ steps.key.outputs.baseline }}
+
+      - name: Free disk space for Buildroot
+        if: steps.baseline-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Restore Buildroot download cache
+        if: steps.baseline-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: br-dl
+          key: br-dl-${{ env.BUILDROOT_VERSION }}-${{ steps.key.outputs.baseline }}
+          restore-keys: br-dl-${{ env.BUILDROOT_VERSION }}-
+
+      - name: Set up Buildroot
+        if: steps.baseline-cache.outputs.cache-hit != 'true'
+        run: bash builder/scripts/01-setup-buildroot.sh
+
+      - name: Build baseline (kernel + rootfs)
+        if: steps.baseline-cache.outputs.cache-hit != 'true'
+        env:
+          BR2_DL_DIR: ${{ github.workspace }}/br-dl
+          JOBS: 4
+        run: |
+          # The builder repo commits its scripts without +x, so call them via bash.
+          # Buildroot refuses to run with "." or empty entries in these.
+          unset LD_LIBRARY_PATH PERL_MM_OPT
+          bash builder/scripts/02-build-baseline.sh --config "$CONFIG_SET"
+          dir=$(ls -d builder/artifacts/"$CONFIG_SET"-* | sort | tail -n1)
+          mkdir -p baseline
+          cp -a "$dir"/. baseline/
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildroot-logs
+          path: builder/artifacts/*/logs/
+          if-no-files-found: ignore
+
+      - name: Save baseline cache
+        if: steps.baseline-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: baseline
+          key: ${{ steps.key.outputs.baseline }}
+
+      - name: Package PolyBandit payload into /root
+        run: |
+          bash builder/scripts/03-package-payload.sh \
+            --repo "$GITHUB_WORKSPACE/payload" \
+            --ref "$GITHUB_SHA" \
+            --baseline baseline \
+            --output out \
+            --rename-to-install "$INSTALLER" \
+            --output-prefix "$OUTPUT_PREFIX" \
+            --force
+
+      - name: Verify image contents
+        run: |
+          bash payload/.github/scripts/verify-image.sh \
+            out/"$OUTPUT_PREFIX".rootfs.cpio.gz \
+            builder/config-sets/"$CONFIG_SET"/required-commands.txt
+
+      - name: Write checksums
+        run: cd out && sha256sum "$OUTPUT_PREFIX".bzImage "$OUTPUT_PREFIX".rootfs.cpio.gz | tee SHA256SUMS
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.OUTPUT_PREFIX }}-${{ env.CONFIG_SET }}-${{ github.sha }}
+          path: |
+            out/${{ env.OUTPUT_PREFIX }}.bzImage
+            out/${{ env.OUTPUT_PREFIX }}.rootfs.cpio.gz
+            out/SHA256SUMS
+            out/manifest/
+            baseline/manifest/
+            baseline/configs/
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber \
+            out/"$OUTPUT_PREFIX".bzImage out/"$OUTPUT_PREFIX".rootfs.cpio.gz out/SHA256SUMS
