@@ -1,10 +1,11 @@
-name: Build PB v3
-# Builds a v86-bootable PolyBandit v3 image (bzImage + rootfs.cpio.gz) by
-# running giacobe/buildroot-builder2:
+name: Build PolyBandit v3 image
+
+# Builds v86-bootable PolyBandit v3 image by using buildroot-builder2:
 #   01-setup-buildroot.sh  -> download Buildroot
 #   02-build-baseline.sh   -> build kernel + baseline rootfs   (slow, cached)
 #   03-package-payload.sh  -> merge this repo into /root       (seconds)
-
+# The baseline is only rebuilt when the Buildroot version, the config set or
+# the builder's build script changes, so most runs only repackage the payload.
 
 on:
   push:
@@ -141,6 +142,35 @@ jobs:
           bash payload/.github/scripts/verify-image.sh \
             out/"$OUTPUT_PREFIX".rootfs.cpio.gz \
             builder/config-sets/"$CONFIG_SET"/required-commands.txt
+
+      - name: Install QEMU for boot test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 python3-pexpect
+
+      - name: Enable KVM (falls back to slower emulation if unavailable)
+        id: kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+          if [ -w /dev/kvm ]; then echo "flag=--kvm" >> "$GITHUB_OUTPUT"; else echo "flag=" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Boot test (log in, run installer, play through levels)
+        timeout-minutes: 30
+        run: |
+          python3 payload/.github/scripts/boot-test.py \
+            --kernel out/"$OUTPUT_PREFIX".bzImage \
+            --initrd out/"$OUTPUT_PREFIX".rootfs.cpio.gz \
+            --levels 13 --log out/boot.log ${{ steps.kvm.outputs.flag }}
+
+      - name: Upload boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-log-${{ github.sha }}
+          path: out/boot.log
+          if-no-files-found: ignore
 
       - name: Write checksums
         run: cd out && sha256sum "$OUTPUT_PREFIX".bzImage "$OUTPUT_PREFIX".rootfs.cpio.gz | tee SHA256SUMS
