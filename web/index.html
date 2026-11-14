@@ -20,7 +20,11 @@
   .spacer { flex: 1; }
   button { font: inherit; font-size: 14px; color: var(--text); background: #1d232b;
     border: 1px solid #2c3540; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
-  button:hover { border-color: var(--accent); }
+  button:hover, a.button:hover { border-color: var(--accent); }
+  h1 .version { color: var(--text); }
+  a.button { font-size: 14px; color: var(--text); background: #1d232b; text-decoration: none;
+    border: 1px solid #2c3540; border-radius: 6px; padding: 6px 12px; }
+  a.button[hidden] { display: none; }
   main { display: flex; flex-direction: column; align-items: center; padding: 20px; gap: 12px; }
   #screen_container { background: #000; padding: 6px; border-radius: 6px;
     box-shadow: 0 0 0 1px #222a33, 0 10px 30px rgba(0,0,0,.45); outline: none; }
@@ -35,9 +39,10 @@
 </head>
 <body>
 <header>
-  <h1>Poly<span>Bandit</span> v3</h1>
+  <h1>Poly<span>Bandit</span> <span id="version" class="version">v3</span></h1>
   <div id="status"><i></i><span id="status-text">Downloading the virtual machine…</span></div>
   <div class="spacer"></div>
+  <a id="form" class="button" href="#" target="_blank" rel="noopener" hidden>Submit answers</a>
   <button id="ctrlc" title="Send Ctrl+C to the terminal">Ctrl+C</button>
   <button id="restart" title="Start over with a fresh machine (your progress is lost)">Restart</button>
 </header>
@@ -59,9 +64,19 @@
 <script src="v86/libv86.js"></script>
 <script>
 "use strict";
-// build.json is written by CI (commit, date); absent when testing locally.
+// build.json is written by CI (commit, date, version, grading form); absent when testing locally.
 fetch("build.json").then(r => r.ok ? r.json() : null).then(b => {
-  if (b) document.getElementById("build").textContent = b.label;
+  if (!b) return;
+  document.getElementById("build").textContent = b.label;
+  if (b.version) {
+    document.getElementById("version").textContent = b.version;
+    document.title = `PolyBandit ${b.version}`;
+  }
+  if (b.form_url) {
+    const form = document.getElementById("form");
+    form.href = b.form_url;
+    form.hidden = false;
+  }
 }).catch(() => {});
 
 const statusEl = document.getElementById("status");
@@ -75,8 +90,8 @@ const emulator = new V86({
   screen_container: document.getElementById("screen_container"),
   bios: { url: "v86/seabios.bin" },
   vga_bios: { url: "v86/vgabios.bin" },
-  bzimage: { url: "images/polybandit3.bzImage" },
-  initrd: { url: "images/polybandit3.rootfs.cpio.gz" },
+  bzimage: { url: "images/polybandit.bzImage" },
+  initrd: { url: "images/polybandit.rootfs.cpio.gz" },
   // console=ttyS0: kernel messages and the spare getty go to the (unseen)
   // serial port, so the screen shows only the tty1 login, answered below.
   // nomodeset: keeps bochs-drm from taking over the VGA card, which would

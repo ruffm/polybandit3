@@ -1,18 +1,22 @@
-name: Build PolyBandit v3 image
+name: Build PolyBandit images
 
-# Builds PolyBandit v3 image (bzImage + rootfs.cpio.gz):
+# Builds one image (bzImage + rootfs.cpio.gz) per PolyBandit version:
+#   v3    the original game in bandit/
+#   v3.1  giacobe/polybandit3.1, kept as a git subtree in polybandit3.1/
+# Both use the same Buildroot baseline (cached, built once):
 #   01-setup-buildroot.sh  -> download Buildroot
 #   02-build-baseline.sh   -> build kernel + baseline rootfs
-#   03-package-payload.sh  -> merge bandit/ into /root
-# then tests it (image check, QEMU boot test, browser play test of the v86
-# page) and, for pushes to the default branch, publishes the page to GitHub Pages.
+#   03-package-payload.sh  -> merge the variant's folder into /root
+# Each image is then tested (image check, QEMU boot test, browser play test of
+# the v86 page). Pushes to the default branch publish both pages to GitHub
+# Pages: /v3/, /v3.1/ and a landing page at the root.
 
 on:
   push:
     branches: [main, master]
     tags: ['v*']          # path filters below don't apply to tag pushes
     paths-ignore: ['**.md', 'LICENSE']
-  # No path filters on PRs: "build" is a required check, so it must report
+  # No path filters on PRs: the build checks are required, so they must report
   # on every PR, even docs-only ones.
   pull_request:
   schedule:
@@ -47,27 +51,51 @@ permissions:
   contents: write   # needed only to attach images to a release on tag pushes
 
 env:
-  # basic-compression covers what the bandit levels call: tar, gzip, bzip2,
-  # xxd, strings, base64, file, md5sum, sha256sum (hexdump is a BusyBox applet).
+  # basic-compression covers what both versions call: tar, gzip, bzip2, xxd,
+  # strings, base64, file, md5sum, sha256sum (hexdump is a BusyBox applet).
   CONFIG_SET: ${{ inputs.config_set || 'basic-compression' }}
   BUILDROOT_VERSION: ${{ inputs.buildroot_version || '2025.02.15' }}
   # Pinned so builder changes only reach these images when you bump this SHA.
   # To update: use the latest commit from github.com/giacobe/buildroot-builder2.
   BUILDER_REF: ${{ inputs.builder_ref || 'b6fb25fcadbd536a64ca7116f1c12e6daa7b5fd8' }}
-  # Which installer becomes /root/install.sh (the one .profile runs at login).
-  INSTALLER: installbandit.sh
-  OUTPUT_PREFIX: polybandit3
+  V86_VERSION: '0.5.473'
 
 jobs:
   build:
+    name: build (${{ matrix.variant }})
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: v3
+            flavor: v3                      # boot-test.py / verify-image.sh mode
+            payload_dir: bandit             # folder packaged into /root
+            installer: installbandit.sh     # becomes /root/install.sh
+            output_prefix: polybandit3
+          - variant: v3.1
+            flavor: v31
+            payload_dir: polybandit3.1
+            installer: install.sh
+            output_prefix: polybandit3.1
+    env:
+      VARIANT: ${{ matrix.variant }}
+      FLAVOR: ${{ matrix.flavor }}
+      PAYLOAD_DIR: ${{ matrix.payload_dir }}
+      INSTALLER: ${{ matrix.installer }}
+      OUTPUT_PREFIX: ${{ matrix.output_prefix }}
     steps:
       - name: Check out payload (this repo)
         uses: actions/checkout@v6
         with:
           path: payload
           fetch-depth: 0   # 03-package-payload.sh clones this and checks out the SHA
+
+      - name: Lab self-test (test.sh)
+        if: matrix.flavor == 'v31'
+        working-directory: payload/${{ matrix.payload_dir }}
+        run: sh test.sh
 
       - name: Check out buildroot-builder2
         uses: actions/checkout@v6
@@ -135,26 +163,30 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: buildroot-logs
+          name: buildroot-logs-${{ matrix.variant }}
           path: builder/artifacts/*/logs/
           if-no-files-found: ignore
 
       - name: Save baseline cache
+        # On a cold cache both variants build the baseline; whichever finishes
+        # second only logs a warning that the key already exists.
         if: steps.baseline-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           path: baseline
           key: ${{ steps.key.outputs.baseline }}
 
-      - name: Package PolyBandit payload into /root
+      - name: Package ${{ matrix.payload_dir }}/ into /root
         run: |
+          rename=()
+          [ "$INSTALLER" = install.sh ] || rename=(--rename-to-install "$INSTALLER")
           bash builder/scripts/03-package-payload.sh \
             --repo "$GITHUB_WORKSPACE/payload" \
             --ref "$GITHUB_SHA" \
-            --payload-subdir bandit \
+            --payload-subdir "$PAYLOAD_DIR" \
             --baseline baseline \
             --output out \
-            --rename-to-install "$INSTALLER" \
+            "${rename[@]}" \
             --output-prefix "$OUTPUT_PREFIX" \
             --force
 
@@ -162,7 +194,8 @@ jobs:
         run: |
           bash payload/.github/scripts/verify-image.sh \
             out/"$OUTPUT_PREFIX".rootfs.cpio.gz \
-            builder/config-sets/"$CONFIG_SET"/required-commands.txt
+            builder/config-sets/"$CONFIG_SET"/required-commands.txt \
+            payload/"$PAYLOAD_DIR" "$INSTALLER" "$FLAVOR"
 
       - name: Install QEMU for boot test
         run: |
@@ -181,6 +214,7 @@ jobs:
         timeout-minutes: 30
         run: |
           python3 payload/.github/scripts/boot-test.py \
+            --flavor "$FLAVOR" \
             --kernel out/"$OUTPUT_PREFIX".bzImage \
             --initrd out/"$OUTPUT_PREFIX".rootfs.cpio.gz \
             --levels 13 --log out/boot.log ${{ steps.kvm.outputs.flag }}
@@ -189,7 +223,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: boot-log-${{ github.sha }}
+          name: boot-log-${{ matrix.variant }}-${{ github.sha }}
           path: out/boot.log
           if-no-files-found: ignore
 
@@ -203,10 +237,11 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Assemble v86 web page
-        env:
-          V86_VERSION: '0.5.473'
         run: |
-          bash payload/.github/scripts/assemble-site.sh out v86src/bios site \
+          lab_json=payload/"$PAYLOAD_DIR"/lab.json
+          [ -f "$lab_json" ] || lab_json=
+          VERSION_NAME="$VARIANT" LAB_JSON="$lab_json" \
+            bash payload/.github/scripts/assemble-site.sh out "$OUTPUT_PREFIX" v86src/bios site \
             "${GITHUB_SHA::7} · $(date -u +%Y-%m-%d)"
 
       - name: Browser test of the web page (headless Chrome)
@@ -222,29 +257,28 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: page-screenshots-${{ github.sha }}
+          name: page-screenshots-${{ matrix.variant }}-${{ github.sha }}
           path: out/page-shots/
           if-no-files-found: ignore
 
-      - name: Upload Pages site
-        if: >-
-          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        uses: actions/upload-pages-artifact@v5
+      - name: Upload site for the Pages deploy
+        uses: actions/upload-artifact@v6
         with:
-          path: site
+          name: site-${{ matrix.variant }}
+          path: site/
+          retention-days: 7
 
       - name: Write checksums
-        run: cd out && sha256sum "$OUTPUT_PREFIX".bzImage "$OUTPUT_PREFIX".rootfs.cpio.gz | tee SHA256SUMS
+        run: cd out && sha256sum "$OUTPUT_PREFIX".bzImage "$OUTPUT_PREFIX".rootfs.cpio.gz | tee SHA256SUMS-"$VARIANT"
 
       - name: Upload image
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.OUTPUT_PREFIX }}-${{ env.CONFIG_SET }}-${{ github.sha }}
+          name: ${{ matrix.output_prefix }}-${{ env.CONFIG_SET }}-${{ github.sha }}
           path: |
-            out/${{ env.OUTPUT_PREFIX }}.bzImage
-            out/${{ env.OUTPUT_PREFIX }}.rootfs.cpio.gz
-            out/SHA256SUMS
+            out/${{ matrix.output_prefix }}.bzImage
+            out/${{ matrix.output_prefix }}.rootfs.cpio.gz
+            out/SHA256SUMS-${{ matrix.variant }}
             out/manifest/
             baseline/manifest/
             baseline/configs/
@@ -254,19 +288,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Both variants run this; whichever is second finds the release already made.
           gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --generate-notes
+            || gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --generate-notes \
+            || gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null
           gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber \
-            out/"$OUTPUT_PREFIX".bzImage out/"$OUTPUT_PREFIX".rootfs.cpio.gz out/SHA256SUMS
+            out/"$OUTPUT_PREFIX".bzImage out/"$OUTPUT_PREFIX".rootfs.cpio.gz out/SHA256SUMS-"$VARIANT"
 
   deploy:
     name: Deploy to GitHub Pages
-    needs: build
+    needs: build      # waits for both variants; deploys only if both passed
     if: >-
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
@@ -276,6 +313,31 @@ jobs:
       group: pages
       cancel-in-progress: false
     steps:
+      - name: Check out landing page
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: web
+          sparse-checkout-cone-mode: false
+
+      - name: Download both sites
+        uses: actions/download-artifact@v7
+        with:
+          pattern: site-*
+          path: sites
+
+      - name: Combine into one Pages site
+        run: |
+          mkdir -p public
+          cp web/landing.html public/index.html
+          cp -r sites/site-v3 public/v3
+          cp -r sites/site-v3.1 public/v3.1
+          find public -maxdepth 2 | sort
+
+      - name: Upload Pages site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: public
+
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v5

@@ -1,7 +1,8 @@
 // Play the assembled PolyBandit site in headless Chrome like a student:
 // page loads, v86 boots, auto-login reaches the installer, an email (typed
-// with a real Shift+2 for "@") is accepted, bandit1's banner appears, and
-// nextlevel reaches bandit2.
+// with a real Shift+2 for "@") is accepted, bandit1's README appears, and
+// nextlevel reaches bandit2. Works for both PolyBandit 3 and 3.1 (3.1's
+// nextlevel may answer "still being prepared" at first; that is retried).
 // Usage: node page-test.mjs <url> [screenshot-dir]
 import puppeteer from "puppeteer-core";
 import fs from "node:fs";
@@ -54,15 +55,22 @@ try {
   console.log(`installer prompt on screen after ${secs()}`);
   await page.click("#screen_container");
   await typeText("ci-page@psu.edu\n");
-  await waitFor(/ci-page@psu\.edu your email address\? \(y\/n\)/, 30000, "the email confirmation");
+  await waitFor(/ci-page@psu\.edu.*\(y\/n\)/, 30000, "the email confirmation");
   await typeText("y\n");
-  await waitFor(/Welcome to The PolyLinux Game/, 300000, "the bandit1 banner");
-  await waitFor(/Level\s*:\s*bandit1/, 10000, "Level: bandit1");
+  await waitFor(/Level\s*:\s*bandit1\b/, 300000, "bandit1's README (Level: bandit1)");
   console.log(`bandit1 banner after ${secs()}`);
   await new Promise(r => setTimeout(r, 1500));
   await page.screenshot({ path: `${shots}/bandit1.png` });
-  await typeText("nextlevel\n");
-  await waitFor(/Level\s*:\s*bandit2/, 60000, "nextlevel to reach bandit2");
+  const until = Date.now() + 240000;
+  for (;;) {
+    await typeText("clear\nnextlevel\n");
+    // Wait for one of the two outcomes before deciding, so a slow su can't
+    // make us type nextlevel twice and skip past bandit2.
+    await waitFor(/Level\s*:\s*bandit2\b|still being prepared/, 60000, "nextlevel to answer");
+    if (/Level\s*:\s*bandit2\b/.test(await screenText())) break;
+    if (Date.now() > until) throw new Error("bandit2 was still being prepared after 240s");
+    await new Promise(r => setTimeout(r, 3000));   // 3.1: level not ready yet; retry
+  }
   console.log(`nextlevel reached bandit2 after ${secs()}`);
   ok = errors.length === 0;
   if (!ok) console.log(`::error::page test: JavaScript errors on the page: ${errors.join(" | ")}`);
