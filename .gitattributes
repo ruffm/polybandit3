@@ -1,2 +1,12 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts and login files run inside the Linux image: always LF,
+# even when checked out on Windows.
+*.sh        text eol=lf
+*.py        text eol=lf
+*.yml       text eol=lf
+profile     text eol=lf
+.profile    text eol=lf
+nextlevel   text eol=lf
+prevlevel   text eol=lf

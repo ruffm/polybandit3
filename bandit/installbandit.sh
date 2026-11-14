@@ -50,7 +50,7 @@ levelsetname="bandit"
 
 # Call each level's install script
 
-echo -n Building 10 levels [
+echo -n Building 13 levels [
 for levelnumber in 1 2 3 4 5 6 7 8 9 10 11 12 13
 #for levelnumber in 1 2 3 4 5 6 
 do
@@ -64,7 +64,7 @@ do
         #create level user account
                 adduser -D -g "User" $levelToBuild
         #create the directory and set the password (to nothing) for the user's account
-                passwd -d $levelToBuild > /dev/null 2>1&
+                passwd -d $levelToBuild > /dev/null 2>&1
         ## Create the README.txt file
                 echo "* Create date: " $currentDate > /home/$readMeLocation
                 echo "* User       : " $USER_ID >> /home/$readMeLocation
@@ -86,4 +86,6 @@ echo done
 
 #rm setup.sh
 #clear
+# Let every background level generator finish before the student logs in.
+wait
 su -l bandit1 

@@ -3,7 +3,7 @@ name: Build PolyBandit v3 image
 # Builds PolyBandit v3 image (bzImage + rootfs.cpio.gz):
 #   01-setup-buildroot.sh  -> download Buildroot
 #   02-build-baseline.sh   -> build kernel + baseline rootfs
-#   03-package-payload.sh  -> merge this repo into /root
+#   03-package-payload.sh  -> merge bandit/ into /root
 
 on:
   push:
@@ -80,7 +80,7 @@ jobs:
           for f in builder/config-sets/"$CONFIG_SET"/defconfig builder/config-sets/"$CONFIG_SET"/features.fragment; do
             [ -f "$f" ] && sed -i '/^BR2_PACKAGE_HOST_QEMU/d' "$f"
           done
-          ! grep -h '^BR2_PACKAGE_HOST_QEMU' builder/config-sets/"$CONFIG_SET"/* 
+          ! grep -h '^BR2_PACKAGE_HOST_QEMU' builder/config-sets/"$CONFIG_SET"/*
 
       - name: Compute baseline cache key
         id: key
@@ -148,6 +148,7 @@ jobs:
           bash builder/scripts/03-package-payload.sh \
             --repo "$GITHUB_WORKSPACE/payload" \
             --ref "$GITHUB_SHA" \
+            --payload-subdir bandit \
             --baseline baseline \
             --output out \
             --rename-to-install "$INSTALLER" \

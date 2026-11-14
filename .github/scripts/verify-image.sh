@@ -60,6 +60,13 @@ done
 grep -q 'levelsetname="bandit"' "$tmp/root/install.sh" 2>/dev/null \
   || err "/root/install.sh is not the bandit installer"
 [ ! -e "$tmp/root/installbandit.sh" ] || err "installbandit.sh should have been renamed to install.sh"
+grep -qx 'wait' "$tmp/root/install.sh" 2>/dev/null \
+  || err "/root/install.sh does not wait for the level generators before su -l bandit1"
+
+# Only the bandit/ payload belongs in the image: no CI files, other labs, or saved sessions.
+for f in .github "bandit current status.txt" basic1.sh level1FM.sh TJInstall.sh dictionaries etc; do
+  [ ! -e "$tmp/root/$f" ] || err "unexpected file in /root: $f (package with --payload-subdir bandit)"
+done
 
 if crlf=$(grep -rlI $'\r' "$tmp/root" --include='*.sh' --include=.profile --include=profile --include=nextlevel --include=prevlevel); then
   err "CRLF line endings in: $crlf"

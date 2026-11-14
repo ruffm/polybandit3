@@ -107,9 +107,6 @@ def main():
                  f"(date {guest_date})")
         print(f"bandit1 flag OK ({flag})")
 
-        # Background level generators were launched with '&'; give them time.
-        run("sleep 15", timeout=120)
-
         # 5: walk the levels with nextlevel
         for n in range(2, a.levels + 1):
             vm.sendline("nextlevel")
